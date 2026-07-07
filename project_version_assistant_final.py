@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "Git-Tool"
-APP_VERSION = "1.5"
+APP_VERSION = "1.5.1"
 # 优化操作弹出黑窗口问题
 DEFAULT_BRANCH = "master"
 
@@ -975,12 +975,73 @@ class MainWindow(QMainWindow):
         ok, out = self.run_git(["remote", "get-url", "origin"], timeout=10)
         return ok and bool(out.strip())
 
+    def remote_refs_status(self):
+        ok, out = self.run_git(["ls-remote", "--heads", "origin"], timeout=60)
+        if not ok:
+            return False, None, out
+
+        return True, bool(out.strip()), out
+
+    def remote_default_branch(self):
+        ok, out = self.run_git(["ls-remote", "--symref", "origin", "HEAD"], timeout=60)
+        if not ok:
+            return None
+
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("ref: refs/heads/") and line.endswith("HEAD"):
+                return line.split("refs/heads/", 1)[1].split()[0]
+
+        return None
+
+    def remote_branch_exists(self, branch):
+        if not branch:
+            return False
+
+        ok, out = self.run_git(["ls-remote", "--heads", "origin", branch], timeout=60)
+        return ok and bool(out.strip())
+
+    def first_remote_branch(self):
+        ok, out = self.run_git(["ls-remote", "--heads", "origin"], timeout=60)
+        if not ok:
+            return None
+
+        for line in out.splitlines():
+            line = line.strip()
+            if "refs/heads/" in line:
+                return line.split("refs/heads/", 1)[1].strip()
+
+        return None
+
+    def ensure_remote_has_code(self):
+        ok, has_refs, out = self.remote_refs_status()
+        if not ok:
+            self.show_error("检查远程仓库失败", out)
+            return False
+
+        if not has_refs:
+            self.add_status("远程仓库为空，已停止获取最新版本")
+            self.show_info("远程仓库为空", "远程仓库为空，不会拉取。")
+            return False
+
+        return True
+
     def has_upstream(self):
         ok, out = self.run_git(
             ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             timeout=10
         )
         return ok and bool(out.strip())
+
+    def upstream_ref(self):
+        ok, out = self.run_git(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            timeout=10
+        )
+        if ok and out.strip():
+            return out.strip()
+
+        return None
 
     def remote_status_text(self):
         if not self.has_remote_origin():
@@ -1477,38 +1538,124 @@ class MainWindow(QMainWindow):
         self.show_info("完成", "云端项目已下载到当前空文件夹。")
         return True
 
+    def fetch_remote_branch_to_worktree(self, branch):
+        ok, out = self.run_git(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], timeout=180)
+        if not ok:
+            self.show_error("获取最新失败", out)
+            return False
+
+        ok, out = self.run_git(["checkout", "-B", branch, f"origin/{branch}"], timeout=180)
+        if not ok:
+            self.show_error(
+                "获取最新失败",
+                out + "\n\n可能是当前文件夹中已有文件与远程仓库文件冲突，请处理后再试。"
+            )
+            return False
+
+        ok, out = self.run_git(["reset", "--hard", f"origin/{branch}"], timeout=180)
+        if not ok:
+            self.show_error("获取最新失败", out)
+            return False
+
+        self.run_git(["branch", "--set-upstream-to", f"origin/{branch}", branch], timeout=30)
+        return True
+
+    def reset_current_branch_to_remote(self):
+        branch = self.current_branch()
+        upstream = self.upstream_ref()
+
+        ok, out = self.run_git(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], timeout=180)
+        if not ok:
+            self.show_error("获取最新失败", out)
+            return False
+
+        if upstream:
+            remote_ref = upstream
+        else:
+            if not self.remote_branch_exists(branch):
+                self.show_info("提示", f"远程仓库没有当前分支：{branch}\n\n请先确认远程分支，或切换到已有远程分支后再获取最新版本。")
+                return False
+
+            remote_ref = f"origin/{branch}"
+
+        ok, out = self.run_git(["reset", "--hard", remote_ref], timeout=180)
+        if not ok:
+            self.show_error("获取最新失败", out)
+            return False
+
+        ok, out = self.run_git(["clean", "-fd"], timeout=120)
+        if not ok:
+            self.show_error("清理本地多余文件失败", out)
+            return False
+
+        if not upstream:
+            self.run_git(["branch", "--set-upstream-to", remote_ref, branch], timeout=30)
+
+        return True
+
+    def init_and_pull_latest(self):
+        if not self.init_git_repo():
+            return False
+
+        if not self.ensure_remote_if_needed():
+            return False
+
+        if not self.ensure_remote_has_code():
+            return False
+
+        branch = self.remote_default_branch() or self.first_remote_branch() or DEFAULT_BRANCH
+
+        self.set_operation_state("获取中", "busy")
+        self.add_status("开始获取远程仓库最新代码")
+
+        if not self.fetch_remote_branch_to_worktree(branch):
+            return False
+
+        self.add_status(f"已初始化项目，并获取远程分支最新代码：{branch}")
+        self.refresh_history(silent=True)
+        self.refresh_status(silent=True)
+        self.show_info("完成", "已初始化项目，并获取远程仓库最新代码。")
+        return True
+
     def pull_latest(self):
         if not self.ask_repo():
             return False
 
-        if not self.is_git_repo() and self.is_selected_folder_empty():
-            return self.clone_remote_repo_into_current_folder()
-
         if not self.is_git_repo():
-            self.show_info("提示", "当前项目还没有初始化 Git。")
-            return False
+            return self.init_and_pull_latest()
 
         if not self.has_remote_origin():
             self.show_info("提示", "当前项目还没有绑定远程仓库。")
             return False
 
-        if self.has_upstream():
-            ok, out = self.run_git(["pull", "--rebase", "--autostash"], timeout=180)
-        else:
-            branch = self.current_branch()
-            ok, out = self.run_git(["pull", "origin", branch, "--rebase", "--autostash"], timeout=180)
+        if not self.ensure_remote_has_code():
+            return False
 
-        if ok:
-            self.add_status("获取最新版本成功")
+        if not self.has_commits():
+            branch = self.remote_default_branch() or self.first_remote_branch() or DEFAULT_BRANCH
+            self.set_operation_state("获取中", "busy")
+            self.add_status("本地仓库还没有版本，开始获取远程仓库最新代码")
+
+            if not self.fetch_remote_branch_to_worktree(branch):
+                return False
+
+            self.add_status(f"已获取远程分支最新代码：{branch}")
             self.refresh_history(silent=True)
-            self.show_info("完成", "获取最新版本成功。")
+            self.refresh_status(silent=True)
+            self.show_info("完成", "已获取远程仓库最新代码。")
             return True
 
-        self.show_error(
-            "获取最新失败",
-            out + "\n\n可能存在文件冲突，需要手动处理。"
-        )
-        return False
+        self.set_operation_state("获取中", "busy")
+        self.add_status("开始获取当前分支的远程最新代码")
+
+        if not self.reset_current_branch_to_remote():
+            return False
+
+        self.add_status("获取最新版本成功")
+        self.refresh_history(silent=True)
+        self.refresh_status(silent=True)
+        self.show_info("完成", "获取最新版本成功。")
+        return True
 
     # =========================
     # 功能 7：查看历史版本
