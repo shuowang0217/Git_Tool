@@ -2,7 +2,7 @@
 chcp 65001 >nul
 
 echo ========================================
-echo Git-Tool v1.5 - 打包 exe
+echo Git-Tool v1.5.1 - 打包 exe
 echo ========================================
 echo.
 
@@ -29,7 +29,7 @@ pyinstaller ^
   --clean ^
   --onefile ^
   --windowed ^
-  --name "Git-Tool-v1.5" ^
+  --name "Git-Tool-v1.5.1" ^
   %ICON_ARG% ^
   %DATA_ARG% ^
   project_version_assistant_final.py
@@ -44,6 +44,6 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo 打包完成
-echo exe 位置：dist\Git-Tool-v1.5.exe
+echo exe 位置：dist\Git-Tool-v1.5.1.exe
 echo ========================================
 pause
